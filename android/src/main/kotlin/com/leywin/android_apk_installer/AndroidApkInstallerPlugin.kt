@@ -5,6 +5,8 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageInstaller
+import android.net.Uri
+import android.util.Log
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
@@ -16,11 +18,7 @@ import java.io.IOException
 import java.io.OutputStream
 
 class AndroidApkInstallerPlugin: FlutterPlugin, MethodCallHandler {
-  /// The MethodChannel that will the communication between Flutter and native Android
-  ///
-  /// This local reference serves to register the plugin with the Flutter Engine and unregister it
-  /// when the Flutter Engine is detached from the Activity
-  private lateinit var channel : MethodChannel
+  private lateinit var channel: MethodChannel
   private lateinit var context: Context
 
   override fun onAttachedToEngine(flutterPluginBinding: FlutterPlugin.FlutterPluginBinding) {
@@ -34,8 +32,12 @@ class AndroidApkInstallerPlugin: FlutterPlugin, MethodCallHandler {
       "installApk" -> {
         val apkPath: String? = call.argument("apkPath")
         if (apkPath != null) {
-          installApk(apkPath)
-          result.success("Installation started")
+          try {
+            installApk(apkPath)
+            result.success("Installation started")
+          } catch (e: IOException) {
+            result.error("INSTALLATION_FAILED", "Installation failed: ${e.message}", null)
+          }
         } else {
           result.error("INVALID_ARGUMENT", "APK path is required", null)
         }
@@ -43,8 +45,11 @@ class AndroidApkInstallerPlugin: FlutterPlugin, MethodCallHandler {
       "uninstallApk" -> {
         val packageName: String? = call.argument("packageName")
         if (packageName != null) {
-          uninstallApk(packageName)
-          result.success("Uninstallation started")
+          try {
+            uninstallApk(packageName, result)
+          } catch (e: Exception) {
+            result.error("UNINSTALLATION_FAILED", "Uninstallation failed: ${e.message}", null)
+          }
         } else {
           result.error("INVALID_ARGUMENT", "Package name is required", null)
         }
@@ -75,23 +80,58 @@ class AndroidApkInstallerPlugin: FlutterPlugin, MethodCallHandler {
         context,
         sessionId,
         Intent("android.intent.action.MAIN"),
-        0
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
       ).intentSender)
       session.close()
     } catch (e: IOException) {
       e.printStackTrace()
+      throw e
     }
   }
 
   @SuppressLint("MissingPermission")
-  private fun uninstallApk(packageName: String) {
+  private fun uninstallApk(packageName: String, result: Result) {
     val packageInstaller = context.packageManager.packageInstaller
-    packageInstaller.uninstall(packageName, PendingIntent.getBroadcast(
-      context,
-      0,
-      Intent("android.intent.action.MAIN"),
-      0
-    ).intentSender)
+
+    try {
+      // Try to uninstall using PackageInstaller
+      packageInstaller.uninstall(packageName, PendingIntent.getBroadcast(
+        context,
+        0,
+        Intent("android.intent.action.MAIN"),
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+      ).intentSender)
+
+      Log.d("Uninstall", "Uninstallation of $packageName initiated.")
+      result.success("Uninstallation initiated")
+    } catch (e: IllegalArgumentException) {
+      Log.e("UninstallError", "Package not found: $packageName")
+      e.printStackTrace()
+      // Fall back to uninstall using Intent
+      uninstallApkWithIntent(packageName)
+      result.success("Uninstallation fallback initiated using Intent")
+    } catch (e: Exception) {
+      Log.e("UninstallError", "Unexpected error during uninstallation: ${e.message}")
+      e.printStackTrace()
+      // Fall back to uninstall using Intent in case of other exceptions
+      uninstallApkWithIntent(packageName)
+      result.success("Uninstallation fallback initiated using Intent")
+    }
+  }
+
+  @Suppress("DEPRECATION")
+  private fun uninstallApkWithIntent(packageName: String) {
+    try {
+      val intent = Intent(Intent.ACTION_UNINSTALL_PACKAGE)
+      intent.data = Uri.parse("package:$packageName")
+      intent.putExtra(Intent.EXTRA_RETURN_RESULT, true)
+      intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+      context.startActivity(intent)
+      Log.d("Uninstall", "Fallback to Intent for uninstallation of $packageName")
+    } catch (e: Exception) {
+      Log.e("UninstallError", "Error uninstalling package using Intent: ${e.message}")
+      e.printStackTrace()
+    }
   }
 
   override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
