@@ -265,7 +265,6 @@ class AndroidApkInstallerPlugin : FlutterPlugin, MethodCallHandler, ActivityAwar
     val filter = IntentFilter().apply {
       addAction(Intent.ACTION_PACKAGE_ADDED)
       addAction(Intent.ACTION_PACKAGE_REMOVED)
-      addAction(Intent.ACTION_PACKAGE_REPLACED)
       addDataScheme("package")
     }
     context.registerReceiver(installUninstallReceiver, filter)
