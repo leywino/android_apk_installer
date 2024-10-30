@@ -1,3 +1,4 @@
+import 'dart:developer';
 import 'package:flutter/services.dart';
 
 class AndroidApkInstaller {
@@ -41,11 +42,10 @@ class AndroidApkInstaller {
     try {
       await _channel.invokeMethod('setFullScreenMode', {'enable': enable});
     } on PlatformException catch (e) {
-      print("Failed to set full-screen mode: '${e.message}'.");
+      log("Failed to set full-screen mode: '${e.message}'.");
     }
   }
 
-  
   static Stream<Map<String, dynamic>> get installUninstallEvents async* {
     await for (var event in eventChannel.receiveBroadcastStream()) {
       if (event is Map) {
