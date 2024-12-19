@@ -1,6 +1,6 @@
 name: android_apk_installer
 description: "A new Flutter plugin project."
-version: 0.3.0
+version: 0.3.1
 homepage:
 
 environment:

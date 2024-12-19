@@ -16,27 +16,23 @@ import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.EventChannel
-import io.flutter.plugin.common.MethodChannel.MethodCallHandler
-import io.flutter.plugin.common.MethodChannel.Result
 import java.io.File
 import java.io.FileInputStream
 import java.io.IOException
 import java.io.OutputStream
 
-class AndroidApkInstallerPlugin : FlutterPlugin, MethodCallHandler, ActivityAware {
+class AndroidApkInstallerPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, ActivityAware {
     private lateinit var channel: MethodChannel
     private lateinit var eventChannel: EventChannel
     private lateinit var context: Context
-    private lateinit var installResult: Result
+    private var installResult: MethodChannel.Result? = null
     private var activity: Activity? = null
     private var events: EventChannel.EventSink? = null
-
 
     override fun onAttachedToEngine(flutterPluginBinding: FlutterPlugin.FlutterPluginBinding) {
         channel = MethodChannel(flutterPluginBinding.binaryMessenger, "android_apk_installer")
         channel.setMethodCallHandler(this)
-        eventChannel =
-            EventChannel(flutterPluginBinding.binaryMessenger, "app_install_uninstall_events")
+        eventChannel = EventChannel(flutterPluginBinding.binaryMessenger, "app_install_uninstall_events")
         eventChannel.setStreamHandler(object : EventChannel.StreamHandler {
             override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
                 this@AndroidApkInstallerPlugin.events = events
@@ -50,13 +46,18 @@ class AndroidApkInstallerPlugin : FlutterPlugin, MethodCallHandler, ActivityAwar
         context = flutterPluginBinding.applicationContext
 
         // Register the broadcast receiver for installation completion
-        val filter = IntentFilter()
-        filter.addAction(PackageInstaller.ACTION_SESSION_COMMITTED)
+        val filter = IntentFilter().apply {
+            addAction(PackageInstaller.ACTION_SESSION_COMMITTED)
+        }
         context.registerReceiver(installReceiver, filter)
     }
 
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
-        context.unregisterReceiver(installReceiver)
+        try {
+            context.unregisterReceiver(installReceiver)
+        } catch (e: IllegalArgumentException) {
+            Log.e("AndroidApkInstaller", "Receiver already unregistered.")
+        }
         unregisterInstallUninstallReceiver()
         channel.setMethodCallHandler(null)
         eventChannel.setStreamHandler(null)
@@ -78,7 +79,7 @@ class AndroidApkInstallerPlugin : FlutterPlugin, MethodCallHandler, ActivityAwar
         activity = null
     }
 
-    override fun onMethodCall(call: MethodCall, result: Result) {
+    override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
         when (call.method) {
             "installApk" -> {
                 val apkPath: String? = call.argument("apkPath")
@@ -87,11 +88,7 @@ class AndroidApkInstallerPlugin : FlutterPlugin, MethodCallHandler, ActivityAwar
                         installResult = result
                         installApk(apkPath)
                     } catch (e: IOException) {
-                        result.error(
-                            "INSTALLATION_FAILED",
-                            "Installation failed: ${e.message}",
-                            null
-                        )
+                        result.error("INSTALLATION_FAILED", "Installation failed: ${e.message}", null)
                     }
                 } else {
                     result.error("INVALID_ARGUMENT", "APK path is required", null)
@@ -100,16 +97,12 @@ class AndroidApkInstallerPlugin : FlutterPlugin, MethodCallHandler, ActivityAwar
 
             "uninstallApk" -> {
                 val packageName: String? = call.argument("packageName")
-                val askPrompt: Boolean? = call.argument("askPrompt")
+                val askPrompt: Boolean = call.argument("askPrompt") ?: false
                 if (packageName != null) {
                     try {
-                        uninstallApk(packageName, askPrompt!!, result)
+                        uninstallApk(packageName, askPrompt, result)
                     } catch (e: Exception) {
-                        result.error(
-                            "UNINSTALLATION_FAILED",
-                            "Uninstallation failed: ${e.message}",
-                            null
-                        )
+                        result.error("UNINSTALLATION_FAILED", "Uninstallation failed: ${e.message}", null)
                     }
                 } else {
                     result.error("INVALID_ARGUMENT", "Package name is required", null)
@@ -124,8 +117,7 @@ class AndroidApkInstallerPlugin : FlutterPlugin, MethodCallHandler, ActivityAwar
 
     private fun installApk(apkPath: String) {
         val packageInstaller = context.packageManager.packageInstaller
-        val params =
-            PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL)
+        val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL)
         val file = File(apkPath)
         params.setSize(file.length())
 
@@ -139,10 +131,10 @@ class AndroidApkInstallerPlugin : FlutterPlugin, MethodCallHandler, ActivityAwar
             inputStream.close()
             out.close()
 
-            // Create a PendingIntent for the completion event
-            val intent = Intent(context, installReceiver::class.java)
-            intent.action = PackageInstaller.ACTION_SESSION_COMMITTED
-            intent.putExtra(PackageInstaller.EXTRA_SESSION_ID, sessionId)
+            val intent = Intent(context, installReceiver::class.java).apply {
+                action = PackageInstaller.ACTION_SESSION_COMMITTED
+                putExtra(PackageInstaller.EXTRA_SESSION_ID, sessionId)
+            }
 
             val pendingIntent = PendingIntent.getBroadcast(
                 context,
@@ -156,12 +148,27 @@ class AndroidApkInstallerPlugin : FlutterPlugin, MethodCallHandler, ActivityAwar
 
         } catch (e: IOException) {
             e.printStackTrace()
-            throw e
+            installResult?.error("INSTALLATION_FAILED", "Installation failed: ${e.message}", null)
+        }
+    }
+
+    private val installReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val result = installResult ?: return
+            val status = intent?.getIntExtra(PackageInstaller.EXTRA_STATUS, PackageInstaller.STATUS_FAILURE)
+
+            if (status == PackageInstaller.STATUS_SUCCESS) {
+                result.success("Installation successful")
+            } else {
+                val errorMsg = intent?.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE)
+                result.error("INSTALLATION_FAILED", "Installation failed: $errorMsg", null)
+            }
+            installResult = null
         }
     }
 
     @SuppressLint("MissingPermission")
-    private fun uninstallApk(packageName: String, askPrompt: Boolean, result: Result) {
+    private fun uninstallApk(packageName: String, askPrompt: Boolean, result: MethodChannel.Result) {
         Log.d("Uninstall", "Attempting to uninstall $packageName")
         val packageInstaller = context.packageManager.packageInstaller
 
@@ -179,8 +186,6 @@ class AndroidApkInstallerPlugin : FlutterPlugin, MethodCallHandler, ActivityAwar
                     PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
                 ).intentSender
             )
-
-            Log.d("Uninstall", "Uninstallation of $packageName initiated.")
             result.success("Uninstallation initiated")
         } catch (e: IllegalArgumentException) {
             Log.e("UninstallError", "Package not found: $packageName")
@@ -195,34 +200,20 @@ class AndroidApkInstallerPlugin : FlutterPlugin, MethodCallHandler, ActivityAwar
         }
     }
 
-    private val installReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent?) {
-            val status =
-                intent?.getIntExtra(PackageInstaller.EXTRA_STATUS, PackageInstaller.STATUS_FAILURE)
-
-            if (status == PackageInstaller.STATUS_SUCCESS) {
-                installResult.success("Installation successful")
-            } else {
-                val errorMsg = intent?.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE)
-                installResult.error("INSTALLATION_FAILED", "Installation failed: $errorMsg", null)
-            }
-        }
-    }
-
-    @Suppress("DEPRECATION")
     private fun uninstallApkWithIntent(packageName: String) {
         try {
-            val intent = Intent(Intent.ACTION_UNINSTALL_PACKAGE)
-            intent.data = Uri.parse("package:$packageName")
-            intent.putExtra(Intent.EXTRA_RETURN_RESULT, true)
-            intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            val intent = Intent(Intent.ACTION_UNINSTALL_PACKAGE).apply {
+                data = Uri.parse("package:$packageName")
+                putExtra(Intent.EXTRA_RETURN_RESULT, true)
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            }
             context.startActivity(intent)
-            Log.d("Uninstall", "Fallback to Intent for uninstallation of $packageName")
         } catch (e: Exception) {
             Log.e("UninstallError", "Error uninstalling package using Intent: ${e.message}")
             e.printStackTrace()
         }
     }
+
     private fun registerInstallUninstallReceiver() {
         val filter = IntentFilter().apply {
             addAction(Intent.ACTION_PACKAGE_ADDED)
@@ -232,28 +223,19 @@ class AndroidApkInstallerPlugin : FlutterPlugin, MethodCallHandler, ActivityAwar
         context.registerReceiver(installUninstallReceiver, filter)
     }
 
-    // Unregister receiver for app install/uninstall events
     private fun unregisterInstallUninstallReceiver() {
-        context.unregisterReceiver(installUninstallReceiver)
-    }
-
-    // BroadcastReceiver to handle app installation and uninstallation events
-    private val installUninstallReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent?) {
-            val status =
-                intent?.getIntExtra(PackageInstaller.EXTRA_STATUS, PackageInstaller.STATUS_FAILURE)
-
-            if (::installResult.isInitialized) { // Check if installResult is initialized
-                if (status == PackageInstaller.STATUS_SUCCESS) {
-                    installResult.success("Installation successful")
-                } else {
-                    val errorMsg = intent?.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE)
-                    installResult.error("INSTALLATION_FAILED", "Installation failed: $errorMsg", null)
-                }
-            } else {
-                Log.e("InstallReceiver", "installResult not initialized.")
-            }
+        try {
+            context.unregisterReceiver(installUninstallReceiver)
+        } catch (e: IllegalArgumentException) {
+            Log.e("UnregisterReceiver", "Receiver not registered: ${e.message}")
         }
     }
 
+    private val installUninstallReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val action = intent?.action
+            val packageName = intent?.data?.encodedSchemeSpecificPart
+            events?.success(mapOf("action" to action, "packageName" to packageName))
+        }
+    }
 }
