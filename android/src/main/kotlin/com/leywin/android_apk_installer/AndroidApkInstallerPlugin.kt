@@ -8,17 +8,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageInstaller
-import android.content.pm.PackageManager
-import android.graphics.Color
-import android.graphics.PixelFormat
 import android.net.Uri
-import android.os.Build
 import android.util.Log
-import android.view.Gravity
-import android.view.View
-import android.view.WindowInsets
-import android.view.WindowInsetsController
-import android.view.WindowManager
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.embedding.engine.plugins.activity.ActivityAware
 import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
@@ -39,8 +30,6 @@ class AndroidApkInstallerPlugin : FlutterPlugin, MethodCallHandler, ActivityAwar
     private lateinit var installResult: Result
     private var activity: Activity? = null
     private var events: EventChannel.EventSink? = null
-    private var overlayView: View? = null
-    private lateinit var windowManager: WindowManager
 
 
     override fun onAttachedToEngine(flutterPluginBinding: FlutterPlugin.FlutterPluginBinding) {
@@ -124,16 +113,6 @@ class AndroidApkInstallerPlugin : FlutterPlugin, MethodCallHandler, ActivityAwar
                     }
                 } else {
                     result.error("INVALID_ARGUMENT", "Package name is required", null)
-                }
-            }
-
-            "setFullScreenMode" -> {
-                val enable: Boolean? = call.argument("enable")
-                if (enable != null) {
-                    setFullScreenMode(enable, result)
-                    result.success(null)
-                } else {
-                    result.error("INVALID_ARGUMENT", "Enable parameter is required", null)
                 }
             }
 
@@ -244,121 +223,6 @@ class AndroidApkInstallerPlugin : FlutterPlugin, MethodCallHandler, ActivityAwar
             e.printStackTrace()
         }
     }
-
-    fun setStatusBarDisableProperty(disable: Boolean, result: MethodChannel.Result) {
-        val command = if (disable) {
-            "setprop persist.sys.statusbar.disable 1"
-        } else {
-            "setprop persist.sys.statusbar.disable 0"
-        }
-
-        try {
-            // Execute the command with root privileges
-            val process = Runtime.getRuntime().exec(arrayOf("su", "-c", command))
-            process.waitFor()
-
-            if (process.exitValue() == 0) {
-                println("System property set successfully")
-            } else {
-                println("Failed to set system property")
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-            println("Error: ${e.message}")
-        }
-    }
-
-
-    @Suppress("DEPRECATION")
-    private fun setFullScreenMode(enable: Boolean, result: MethodChannel.Result) {
-        setStatusBarDisableProperty(enable, result)
-//        if (enable) {
-//            showOverlay()
-//        } else {
-//            removeOverlay()
-//        }
-        activity?.let {
-            if (enable) {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                    // For Android 11 (API 30) and above
-                    val controller = it.window.insetsController
-                    if (controller != null) {
-                        controller.hide(WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars())
-                        controller.systemBarsBehavior =
-                            WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-                    } else {
-                        Log.e("setFullScreenMode", "InsetsController is null.")
-                    }
-                } else {
-                    // For Android versions below 11
-                    @Suppress("DEPRECATION")
-                    it.window.decorView.systemUiVisibility = (
-                            View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-                                    or View.SYSTEM_UI_FLAG_FULLSCREEN
-                                    or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                                    or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                                    or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
-                                    or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-                            )
-                }
-            } else {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                    // For Android 11 (API 30) and above
-                    val controller = it.window.insetsController
-                    controller?.show(WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars())
-                } else {
-                    // For Android versions below 11
-                    @Suppress("DEPRECATION")
-                    it.window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
-                }
-            }
-        } ?: Log.e("setFullScreenMode", "Activity is null, unable to set full screen mode.")
-    }
-
-    @SuppressLint("ServiceCast")
-    private fun showOverlay() {
-        if (overlayView != null) return // Prevent multiple overlays
-
-        windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
-
-        // Create a transparent overlay view
-        overlayView = View(context).apply {
-            setBackgroundColor(Color.WHITE)
-        }
-
-        // Set up layout parameters for the overlay
-        val params = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.MATCH_PARENT,
-            getStatusBarHeight(),
-            WindowManager.LayoutParams.TYPE_SYSTEM_ERROR,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-            PixelFormat.TRANSLUCENT
-        )
-        params.gravity = Gravity.TOP
-
-        // Add the overlay view to the WindowManager
-        windowManager.addView(overlayView, params)
-    }
-
-    private fun removeOverlay() {
-        if (overlayView != null) {
-            windowManager.removeView(overlayView)
-            overlayView = null
-        }
-    }
-
-    private fun getStatusBarHeight(): Int {
-        var result = 0
-        val resourceId = context.resources.getIdentifier("status_bar_height", "dimen", "android")
-        if (resourceId > 0) {
-            result = context.resources.getDimensionPixelSize(resourceId)
-        }
-        return result
-    }
-
-    // Register receiver for app install/uninstall events
     private fun registerInstallUninstallReceiver() {
         val filter = IntentFilter().apply {
             addAction(Intent.ACTION_PACKAGE_ADDED)
@@ -376,9 +240,20 @@ class AndroidApkInstallerPlugin : FlutterPlugin, MethodCallHandler, ActivityAwar
     // BroadcastReceiver to handle app installation and uninstallation events
     private val installUninstallReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            val action = intent?.action
-            val packageName = intent?.data?.encodedSchemeSpecificPart
-            events?.success(mapOf("action" to action, "packageName" to packageName))
+            val status =
+                intent?.getIntExtra(PackageInstaller.EXTRA_STATUS, PackageInstaller.STATUS_FAILURE)
+
+            if (::installResult.isInitialized) { // Check if installResult is initialized
+                if (status == PackageInstaller.STATUS_SUCCESS) {
+                    installResult.success("Installation successful")
+                } else {
+                    val errorMsg = intent?.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE)
+                    installResult.error("INSTALLATION_FAILED", "Installation failed: $errorMsg", null)
+                }
+            } else {
+                Log.e("InstallReceiver", "installResult not initialized.")
+            }
         }
     }
+
 }

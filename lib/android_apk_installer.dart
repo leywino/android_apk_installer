@@ -1,4 +1,3 @@
-import 'dart:developer';
 import 'package:flutter/services.dart';
 
 class AndroidApkInstaller {
@@ -32,17 +31,6 @@ class AndroidApkInstaller {
       return result ?? "Uninstallation successful";
     } on PlatformException catch (e) {
       return "Failed to uninstall APK: '${e.message}'.";
-    }
-  }
-
-  /// Toggle full-screen mode.
-  /// Pass [enable] as `true` to enable full-screen mode,
-  /// or `false` to disable it and restore the system UI.
-  static Future<void> setFullScreenMode(bool enable) async {
-    try {
-      await _channel.invokeMethod('setFullScreenMode', {'enable': enable});
-    } on PlatformException catch (e) {
-      log("Failed to set full-screen mode: '${e.message}'.");
     }
   }
 
